@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# filepath: /home/wangzg/Nutstore Files/Nutstore/备课/2025春/面向生物医学科研的绘图技术/beamer2rmd_v2.py
+
 import re
 import sys
 import os
@@ -32,8 +32,13 @@ output:
     toc: true
     mathjax: true
     widescreen: true
+    highlight: tango
 ---
-
+<style>
+article {{
+  color: #000000;
+}}
+</style>
 """
     else:
         rmd_content = f"""---
@@ -44,18 +49,255 @@ output:
   ioslides_presentation:
     toc: true
     mathjax: true
+    highlight: tango
 ---
-
+<style>
+article {{
+  color: #000000;
+}}
+</style>
 """
 
     # Convert each \section into a slide title
     latex_text = re.sub(r'\\section{(.*?)}', r'## \1', latex_text)
+    
+    # Define function to handle code listings
+    def code_listing_replacer(match):
+        code_content = match.group(1).strip()
+        
+        # Fix issues with escaped characters and symbols in code
+        code_content = code_content.replace('\\', '\\\\')
+        
+        # Fix double dollar signs that often appear in R code for accessing data frames
+        code_content = re.sub(r'([a-zA-Z0-9_\.]+)\$\$([a-zA-Z0-9_\.]+)', r'\1$\2', code_content)
+        
+        # Create R code block
+        return f"\n```r\n{code_content}\n```\n"
+    
+    # Process lstlisting environments - these need to be handled globally before processing frames
+    # Because they might span multiple frames or be shared
+    latex_text = re.sub(r'\\begin{lstlisting}(.*?)\\end{lstlisting}', 
+                       code_listing_replacer, 
+                       latex_text, 
+                       flags=re.DOTALL)
+    
+    # Also handle verbatim environments
+    latex_text = re.sub(r'\\begin{verbatim}(.*?)\\end{verbatim}', 
+                       lambda m: f"\n```\n{m.group(1).strip()}\n```\n", 
+                       latex_text, 
+                       flags=re.DOTALL)
+    
+    # Remove font size commands like \scriptsize{...}, \tiny{...}, etc. with proper handling of nested braces
+    def fix_font_size_commands(text):
+        font_size_pattern = r'\\(scriptsize|tiny|small|large|Large|LARGE|huge|Huge)\s*{'
+        
+        while re.search(font_size_pattern, text):
+            match = re.search(font_size_pattern, text)
+            if match:
+                cmd_start = match.start()
+                brace_start = match.end() - 1
+                
+                # Find the matching closing brace
+                brace_level = 1
+                found_closing = False
+                
+                for i in range(brace_start + 1, len(text)):
+                    if text[i] == '{':
+                        brace_level += 1
+                    elif text[i] == '}':
+                        brace_level -= 1
+                        
+                    if brace_level == 0:
+                        # We found the matching closing brace
+                        content = text[brace_start + 1:i]
+                        # Replace the entire font command with just its content
+                        text = text[:cmd_start] + content + text[i + 1:]
+                        found_closing = True
+                        break
+                
+                # If we couldn't find a matching closing brace, break to avoid infinite loop
+                if not found_closing:
+                    break
+        
+        return text
+
+    # Replace the regex-based approach with this function
+    latex_text = fix_font_size_commands(latex_text)
     
     # Define footnote URL replacer function once
     def footnote_url_replacer(match):
         url = match.group(1).strip()
         # Return HTML link
         return f' <a href="{url}" target="_blank">↗</a>'
+    
+    # Process LaTeX tables before processing frames - with enhanced robustness for malformed tables
+    def table_replacer(match):
+        # Extract table environment content
+        table_content = match.group(1).strip()
+        
+        # Handle already markdown-like tables embedded in LaTeX
+        if '|' in table_content and '---' in table_content:
+            # It's likely a markdown table inside LaTeX - just extract and clean it
+            lines = table_content.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                # Skip LaTeX commands, keep only table rows
+                if '|' in line and not line.strip().startswith('\\'):
+                    cleaned_lines.append(line.strip())
+            
+            return '\n' + '\n'.join(cleaned_lines) + '\n'
+        
+        # Extract tabular content - use a more robust pattern that can handle p{width} format
+        tabular_match = re.search(r'\\begin{tabular}{([^}]+)}(.*?)\\end{tabular}', table_content, re.DOTALL)
+        if not tabular_match:
+            # Check if the content already looks like a markdown table (with | characters)
+            if '|' in table_content:
+                # Clean up the content to extract just the table rows
+                lines = table_content.split('\n')
+                cleaned_lines = []
+                for line in lines:
+                    # Skip LaTeX commands, keep only table rows
+                    if '|' in line:
+                        cleaned_lines.append(line.strip())
+                
+                return '\n' + '\n'.join(cleaned_lines) + '\n'
+            return match.group(0)  # Return original if can't match tabular
+        
+        # Get column formatting - strip any p{width} parts which shouldn't appear in output
+        col_format = tabular_match.group(1)
+        tabular_content = tabular_match.group(2)
+        
+        # Remove LaTeX commands for table formatting
+        tabular_content = tabular_content.replace('\\toprule', '')
+        tabular_content = tabular_content.replace('\\midrule', '')
+        tabular_content = tabular_content.replace('\\bottomrule', '')
+        
+        # Split into rows
+        rows = re.split(r'\\\\', tabular_content)
+        
+        # Create markdown table
+        markdown_table = []
+        
+        # Process rows
+        for i, row in enumerate(rows):
+            if not row.strip():
+                continue
+            
+            # Split into cells (by &)
+            cells = row.split('&')
+            cells = [cell.strip() for cell in cells]
+            
+            # Create markdown row
+            md_row = '| ' + ' | '.join(cells) + ' |'
+            markdown_table.append(md_row)
+            
+            # Add header separator after first row
+            if i == 0:
+                # Create header separator based on column count
+                sep_row = '|' + '|'.join(['---' for _ in range(len(cells))]) + '|'
+                markdown_table.append(sep_row)
+        
+        # Join rows to create complete table
+        md_table_text = '\n'.join(markdown_table)
+        
+        # Extract caption if present
+        caption = ""
+        caption_match = re.search(r'\\caption{(.*?)}', table_content)
+        if caption_match:
+            caption = caption_match.group(1)
+            if caption:
+                caption = f"**Table: {caption}**\n\n"
+        
+        return f"\n{caption}{md_table_text}\n"
+    
+    # Process all tables in the document with enhanced pattern matching for malformed tables
+    # Match standard table environments
+    latex_text = re.sub(r'\\begin{table}(.*?)\\end{table}', table_replacer, latex_text, flags=re.DOTALL)
+    
+    # Also try to match malformed table environments with brackets directly after begin
+    latex_text = re.sub(r'\\begin{table\s*\[.*?\]}(.*?)\\end{table}', table_replacer, latex_text, flags=re.DOTALL)
+    
+    # Match tables with extra closing braces
+    latex_text = re.sub(r'\\begin{table}(.*?)\\end{table}\s*}', table_replacer, latex_text, flags=re.DOTALL)
+    
+    # Clean up any redundant table separators that may have been generated
+    # This pattern will match multiple consecutive separator rows and keep only one
+    latex_text = re.sub(r'(\|\s*---\s*\|\s*---\s*\|)(\s*\n\|\s*---\s*\|\s*---\s*\|)+', r'\1', latex_text)
+    
+    # Also remove any left-over formatting specifications like p{width} that might have leaked into the table
+    latex_text = re.sub(r'\|\s*p{\d+(\.\d+)?(cm|in|pt|em|ex|mm)}\s*', '| ', latex_text)
+    
+    # Handle fully malformed or hybrid markdown tables in the document
+    def malformed_table_handler(latex_text):
+        # Find potential markdown-like tables that aren't properly wrapped in LaTeX environments
+        # Look for patterns of lines with multiple | characters that might be tables
+        lines = latex_text.split('\n')
+        in_potential_table = False
+        table_start_idx = -1
+        table_end_idx = -1
+        table_sections = []
+        
+        for i, line in enumerate(lines):
+            # If we see a line with multiple | characters that looks like a table row
+            if line.count('|') >= 2 and not line.strip().startswith('\\'):
+                if not in_potential_table:
+                    in_potential_table = True
+                    table_start_idx = i
+            # If we were in a potential table but this line doesn't look like part of it
+            elif in_potential_table and (line.count('|') < 2 or not line.strip()):
+                in_potential_table = False
+                table_end_idx = i
+                # Save the table section boundaries
+                table_sections.append((table_start_idx, table_end_idx))
+        
+        # If we're still in a table at the end of the file
+        if in_potential_table:
+            table_sections.append((table_start_idx, len(lines)))
+        
+        # Process each table section
+        for start, end in reversed(table_sections):  # Process in reverse to maintain indices
+            table_lines = lines[start:end]
+            
+            # Clean the table
+            cleaned_table = []
+            header_separator_added = False
+            
+            for i, line in enumerate(table_lines):
+                # Skip lines that are clearly not table content
+                if not line.strip() or line.strip().startswith('\\'):
+                    continue
+                
+                # Clean the line
+                cleaned_line = line.strip()
+                
+                # Make sure the line starts and ends with |
+                if not cleaned_line.startswith('|'):
+                    cleaned_line = '| ' + cleaned_line
+                if not cleaned_line.endswith('|'):
+                    cleaned_line = cleaned_line + ' |'
+                
+                cleaned_table.append(cleaned_line)
+                
+                # Add header separator if needed
+                if i == 0 and not header_separator_added:
+                    # Count cells to create appropriate separator
+                    cell_count = cleaned_line.count('|') - 1
+                    separator = '|' + '|'.join(['---' for _ in range(cell_count)]) + '|'
+                    cleaned_table.append(separator)
+                    header_separator_added = True
+            
+            # Replace the original table lines with the cleaned version
+            if cleaned_table:
+                # Join the cleaned table lines
+                cleaned_table_text = '\n'.join(cleaned_table)
+                # Replace the original table section in the lines list
+                lines[start:end] = [cleaned_table_text]
+        
+        # Join the modified lines back together
+        return '\n'.join(lines)
+    
+    # Apply the malformed table handler
+    latex_text = malformed_table_handler(latex_text)
     
     # Convert each \frame{...} into a slide
     frames = re.findall(r'\\begin{frame}.*?\{(.*?)\}(.*?)\\end{frame}', latex_text, re.DOTALL)
@@ -130,6 +372,138 @@ output:
             
             # Convert \textbullet to bullet character •
             content = re.sub(r'\\textbullet\s*', '• ', content)
+            
+            # Handle inline tables with malformed syntax
+            def inline_table_replacer(match):
+                # Extract table environment content
+                table_content = match.group(1).strip()
+                
+                # Handle already markdown-like tables embedded in LaTeX
+                if '|' in table_content and ('---' in table_content or table_content.count('|') > 10):
+                    # It's likely a markdown table inside LaTeX - just extract and clean it
+                    lines = table_content.split('\n')
+                    cleaned_lines = []
+                    for line in lines:
+                        # Skip LaTeX commands, keep only table rows
+                        if '|' in line and not line.strip().startswith('\\'):
+                            cleaned_lines.append(line.strip())
+                    
+                    return '\n' + '\n'.join(cleaned_lines) + '\n'
+                
+                # Extract tabular content
+                tabular_match = re.search(r'\\begin{tabular}{([^}]+)}(.*?)\\end{tabular}', table_content, re.DOTALL)
+                if not tabular_match:
+                    # Check if the content already looks like a markdown table (with | characters)
+                    if '|' in table_content:
+                        # Clean up the content to extract just the table rows
+                        lines = table_content.split('\n')
+                        cleaned_lines = []
+                        for line in lines:
+                            # Skip LaTeX commands, keep only table rows
+                            if '|' in line:
+                                cleaned_lines.append(line.strip())
+                        
+                        return '\n' + '\n'.join(cleaned_lines) + '\n'
+                    return match.group(0)  # Return original if can't match tabular
+                
+                # Get column formatting
+                col_format = tabular_match.group(1)
+                tabular_content = tabular_match.group(2)
+                
+                # Remove LaTeX commands for table formatting
+                tabular_content = tabular_content.replace('\\toprule', '')
+                tabular_content = tabular_content.replace('\\midrule', '')
+                tabular_content = tabular_content.replace('\\bottomrule', '')
+                
+                # Split into rows
+                rows = re.split(r'\\\\', tabular_content)
+                
+                # Create markdown table
+                markdown_table = []
+                
+                # Process rows
+                for i, row in enumerate(rows):
+                    if not row.strip():
+                        continue
+                    
+                    # Split into cells (by &)
+                    cells = row.split('&')
+                    cells = [cell.strip() for cell in cells]
+                    
+                    # Create markdown row
+                    md_row = '| ' + ' | '.join(cells) + ' |'
+                    markdown_table.append(md_row)
+                    
+                    # Add header separator after first row
+                    if i == 0:
+                        # Create header separator based on column count
+                        sep_row = '|' + '|'.join(['---' for _ in cells]) + '|'
+                        markdown_table.append(sep_row)
+                
+                # Join rows to create complete table
+                md_table_text = '\n'.join(markdown_table)
+                
+                # Extract caption if present
+                caption = ""
+                caption_match = re.search(r'\\caption{(.*?)}', table_content)
+                if caption_match:
+                    caption = caption_match.group(1)
+                    if caption:
+                        caption = f"**Table: {caption}**\n\n"
+                
+                return f"\n{caption}{md_table_text}\n"
+            
+            # Process inline tables with various malformed patterns
+            content = re.sub(r'\\begin{table}(.*?)\\end{table}', inline_table_replacer, content, flags=re.DOTALL)
+            content = re.sub(r'\\begin{table\s*\[.*?\]}(.*?)\\end{table}', inline_table_replacer, content, flags=re.DOTALL)
+            content = re.sub(r'\\begin{table.*?}(.*?)\\end{table}', inline_table_replacer, content, flags=re.DOTALL)
+            
+            # Also directly handle tabular environments that might not be in a table environment
+            def tabular_replacer(match):
+                # Get column formatting
+                col_format = match.group(1)
+                tabular_content = match.group(2)
+                
+                # Remove LaTeX commands for table formatting
+                tabular_content = tabular_content.replace('\\toprule', '')
+                tabular_content = tabular_content.replace('\\midrule', '')
+                tabular_content = tabular_content.replace('\\bottomrule', '')
+                
+                # Split into rows
+                rows = re.split(r'\\\\', tabular_content)
+                
+                # Create markdown table
+                markdown_table = []
+                
+                # Process rows
+                for i, row in enumerate(rows):
+                    if not row.strip():
+                        continue
+                    
+                    # Split into cells (by &)
+                    cells = row.split('&')
+                    cells = [cell.strip() for cell in cells]
+                    
+                    # Create markdown row
+                    md_row = '| ' + ' | '.join(cells) + ' |'
+                    markdown_table.append(md_row)
+                    
+                    # Add header separator after first row
+                    if i == 0:
+                        # Create header separator based on column count
+                        sep_row = '|' + '|'.join(['---' for _ in cells]) + '|'
+                        markdown_table.append(sep_row)
+                
+                # Join rows to create complete table
+                md_table_text = '\n'.join(markdown_table)
+                
+                return f"\n{md_table_text}\n"
+            
+            # Process standalone tabular environments
+            content = re.sub(r'\\begin{tabular}{([^}]+)}(.*?)\\end{tabular}', tabular_replacer, content, flags=re.DOTALL)
+            
+            # Process malformed markdown tables in the content
+            content = malformed_table_handler(content)
             
             # Handle figures and captions
             def figure_replacer(match):
